@@ -8,6 +8,10 @@
 
 #include <QDebug>
 
+#include <algorithm>
+#include <cmath>
+#include <cstddef>
+
 namespace neuralnet_tracker_ns
 {
 
@@ -137,6 +141,14 @@ std::pair<float, cv::Rect2f> Localizer::run(const cv::Mat& frame)
         },
         frame.rows, frame.cols);
     const float score = sigmoid(results_[0]);
+
+    // A garbage result must not turn into a NaN ROI which would poison the
+    // ROI tracking and the pose filter.
+    if (!std::isfinite(score) || !std::isfinite(roi.x) || !std::isfinite(roi.y) || !std::isfinite(roi.width)
+        || !std::isfinite(roi.height))
+    {
+        return { 0.f, {} };
+    }
 
     return { score, roi };
 }
@@ -306,6 +318,26 @@ std::optional<PoseEstimator::Face> PoseEstimator::run(const cv::Mat& frame, cons
 
     last_inference_time_ = t.elapsed_ms();
 
+    // Validate the network outputs before using them. A malformed result must
+    // not propagate NaNs into the ROI tracking and the internal filter.
+    auto all_finite = [](const float* values, std::size_t count)
+    { return std::all_of(values, values + count, [](float v) { return std::isfinite(v); }); };
+
+    const bool outputs_finite = all_finite(output_coord_.val, 3) && all_finite(output_quat_.val, 4)
+                                && all_finite(output_box_.val, 4) && all_finite(output_rotaxis_scales_tril_.val, 9)
+                                && all_finite(output_coord_scales_std_.val, 3)
+                                && all_finite(output_coord_scales_tril_.val, 9);
+    if (!outputs_finite)
+    {
+        qDebug() << "Pose model produced non-finite outputs, discarding the result";
+        return {};
+    }
+
+    // `output_coord_[2]` is the head size in the patch's coordinate system and
+    // must be positive. The box must enclose a non-empty area.
+    if (!(output_coord_[2] > 0.f) || !(output_box_[2] > output_box_[0]) || !(output_box_[3] > output_box_[1]))
+        return {};
+
     // Perform coordinate transformation.
     // From patch-local normalized in [-1,1] to
     // frame unnormalized pixel.
@@ -332,6 +364,14 @@ std::optional<PoseEstimator::Face> PoseEstimator::run(const cv::Mat& frame, cons
     // Following Eigen which uses quat components in the order w, x, y, z.
     // As does OpenCV
     cv::Quatf rotation = { output_quat_[3], output_quat_[0], output_quat_[1], output_quat_[2] };
+
+    // The model may output a slightly denormalized quaternion. A near-zero norm
+    // means the output is garbage, otherwise rescale it because everything
+    // downstream assumes a unit quaternion.
+    const float rotation_norm = rotation.norm();
+    if (!(rotation_norm > 1e-3f) || !std::isfinite(rotation_norm))
+        return {};
+    rotation = rotation / rotation_norm;
 
     // Should be lower triangular. If not maybe something is wrong with memory layout ... or the model.
     assert(output_rotaxis_scales_tril_(0, 1) == 0);
