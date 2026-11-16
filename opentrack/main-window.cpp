@@ -277,6 +277,22 @@ void main_window::init_buttons()
 #endif
     connect(ui.btnStartTracker, &QPushButton::clicked, this, &main_window::start_tracker_);
     connect(ui.btnStopTracker, &QPushButton::clicked, this, &main_window::stop_tracker_);
+
+    // Placeholder that takes the preview's grid cell while it is hidden, so the
+    // main window keeps its layout instead of showing an empty hole.
+    preview_placeholder.setAlignment(Qt::AlignCenter);
+    preview_placeholder.setFrameShape(QFrame::StyledPanel);
+    preview_placeholder.setMinimumSize(320, 240);
+    preview_placeholder.setMaximumSize(320, 240);
+    preview_placeholder.setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+    preview_placeholder.setText(tr("Camera preview hidden"));
+    preview_placeholder.setToolTip(tr("Enable \"Show camera preview\" to see the live camera image."));
+    ui.gridLayout_2->addWidget(&preview_placeholder, 0, 0);
+
+    tie_setting(s.show_camera_preview, ui.checkBoxPreview);
+    connect(&s.show_camera_preview, value_::value_changed<bool>(),
+            this, &main_window::set_preview_visible, Qt::DirectConnection);
+    set_preview_visible(s.show_camera_preview);
 }
 
 void main_window::init_dbus()
@@ -459,6 +475,15 @@ void main_window::update_button_state(bool running, bool inertialp)
         ui.video_frame_label->setPixmap(QPixmap(":/images/no-feed.png"));
     }
 #endif
+}
+
+void main_window::set_preview_visible(bool visible)
+{
+    // The tracker draws into ui.video_frame. Hiding its parent keeps the
+    // tracker from rendering (the module checks whether its widget is visible)
+    // while detection and pose output keep running.
+    ui.video_feed->setVisible(visible);
+    preview_placeholder.setVisible(!visible);
 }
 
 void main_window::start_tracker_()

@@ -75,6 +75,10 @@ struct OTR_LOGIC_EXPORT main_settings final
     value<bool> tray_enabled { b, "use-system-tray", false };
     value<bool> tray_start { b, "start-in-tray", false };
 
+    // Live camera image in the main window's preview area. Turning this off
+    // only skips the preview drawing; tracking keeps running.
+    value<bool> show_camera_preview { b, "show-camera-preview", true };
+
     value<bool> center_at_startup { b, "center-at-startup", true };
     value<bool> auto_center { b, "auto-center", false };
     value<double> auto_center_speed { b, "auto-center-speed", 0.06 };

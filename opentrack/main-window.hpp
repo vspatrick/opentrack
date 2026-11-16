@@ -31,6 +31,7 @@
 #include <QMenu>
 #include <QAction>
 #include <QList>
+#include <QLabel>
 
 #include <memory>
 
@@ -72,6 +73,9 @@ class main_window final : public QMainWindow, private State
     process_detector_worker det;
     QMenu profile_menu;
 
+    // Shown in the preview area's place while the camera preview is hidden.
+    QLabel preview_placeholder;
+
     QList<QString> profile_list;
 
     QAction menu_action_header   { &tray_menu },
@@ -102,6 +106,8 @@ public:
     void set_keys_enabled(bool flag);
 
     void update_button_state(bool running, bool inertialp);
+
+    void set_preview_visible(bool visible);
 
 #if !defined _WIN32
     void annoy_if_root();

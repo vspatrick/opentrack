@@ -1117,6 +1117,19 @@
         <number>0</number>
        </property>
        <item>
+        <widget class="QCheckBox" name="checkBoxPreview">
+         <property name="toolTip">
+          <string>Show the live camera image in the preview area. Tracking keeps running when the preview is hidden; only the drawing is skipped.</string>
+         </property>
+         <property name="text">
+          <string>Show camera preview</string>
+         </property>
+         <property name="checked">
+          <bool>true</bool>
+         </property>
+        </widget>
+       </item>
+       <item>
         <widget class="QGroupBox" name="groupTracker">
          <property name="title">
           <string>Input</string>
