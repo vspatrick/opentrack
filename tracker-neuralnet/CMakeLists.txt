@@ -56,7 +56,10 @@ if(OpenCV_FOUND AND ONNXRuntime_FOUND AND OpenMP_FOUND)
 
     if(WIN32)
         if(NOT opentrack-use-onnxruntime-avx-dispatch)
-            otr_install_lib("${ONNXRuntime_RUNTIME}" ".")
+            # The tracker loads onnxruntime.dll at runtime from the module
+            # directory (see maybe_load_onnxruntime_dynamically()), not from
+            # the application directory.
+            otr_install_lib("${ONNXRuntime_RUNTIME}" "${opentrack-libexec}")
         endif()
     endif()
     if(MSVC)
