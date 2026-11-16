@@ -129,12 +129,16 @@ template <class F> struct OnScopeExit
     F f_;
 };
 
-CamIntrinsics make_intrinsics(float aspect_ratio, const Settings& settings)
+CamIntrinsics make_intrinsics(float aspect_ratio, double diagonal_fov_deg, float crop_diagonal_scale)
 {
-    const double diag_fov = settings.fov * M_PI / 180.;
+    const double diag_fov = diagonal_fov_deg * M_PI / 180.;
+    // The field of view was configured for the diagonal of the whole frame.
+    // After cropping only `crop_diagonal_scale` of that diagonal is left, so the
+    // tangent of the half angle of the cropped region shrinks by that factor.
+    const double tan_half_diag_fov = tan(diag_fov / 2.) * crop_diagonal_scale;
     const double aspect_ratio_2 = aspect_ratio*aspect_ratio;
-    const double fov_w = 2. * atan(tan(diag_fov / 2.) / sqrt(1. + 1./aspect_ratio_2));
-    const double fov_h = 2. * atan(tan(diag_fov / 2.) / sqrt(1. + aspect_ratio_2));
+    const double fov_w = 2. * atan(tan_half_diag_fov / sqrt(1. + 1./aspect_ratio_2));
+    const double fov_h = 2. * atan(tan_half_diag_fov / sqrt(1. + aspect_ratio_2));
     const double focal_length_w = 1. / tan(.5 * fov_w);
     const double focal_length_h = 1. / tan(.5 * fov_h);
     /*  a
@@ -160,6 +164,20 @@ cv::Rect make_crop_rect_multiple_of(const cv::Size& size, int multiple)
     const int new_w = (size.width / multiple) * multiple;
     const int new_h = (size.height / multiple) * multiple;
     return cv::Rect((size.width - new_w) / 2, (size.height - new_h) / 2, new_w, new_h);
+}
+
+cv::Rect cropped_rect(const cv::Size& size)
+{
+    cv::Rect roi{ 0, 0, size.width, size.height };
+    // The pose network was trained on 4:3 crops.
+    if (roi.height * 4 != roi.width * 3)
+    {
+        roi = make_crop_rect_for_aspect(roi.size(), 4, 3);
+    }
+    // Keep pyramid levels exact integer divisions of each other.
+    constexpr int multiplier = 1 << (ImagePyramid::max_levels - 1);
+    const cv::Rect aligned = make_crop_rect_multiple_of(roi.size(), multiplier);
+    return { roi.x + aligned.x, roi.y + aligned.y, aligned.width, aligned.height };
 }
 
 template <class T> cv::Rect_<T> squarize(const cv::Rect_<T>& r)
@@ -356,7 +374,9 @@ public:
     GuardedThreadCountSwitch(int num_threads)
     {
         old_num_threads_cv_ = cv::getNumThreads();
-        old_num_threads_omp_ = omp_get_num_threads();
+        // omp_get_num_threads() returns 1 outside of a parallel region. The
+        // value to restore is the configured maximum.
+        old_num_threads_omp_ = omp_get_max_threads();
         omp_set_num_threads(num_threads);
         cv::setNumThreads(num_threads);
     }
@@ -497,7 +517,7 @@ void NeuralNetTracker::draw_gizmos(const std::optional<PoseEstimator::Face>& fac
 QuatPose NeuralNetTracker::transform_to_world_pose(const cv::Quatf& face_rotation, const cv::Point2f& face_xy, const float face_size) const
 {
     const auto& reference_image = pyramid_.coarsest_greyscale();
-    const vec3 face_world_pos = image_to_world(face_xy.x, face_xy.y, face_size, HEAD_SIZE_MM, reference_image.size(), intrinsics_);
+    const vec3 face_world_pos = image_to_world(face_xy.x, face_xy.y, face_size, float(settings_.head_size_mm), reference_image.size(), intrinsics_);
 
     const cv::Quatf rot_correction = compute_rotation_correction(face_world_pos);
 
@@ -609,13 +629,25 @@ bool NeuralNetTracker::load_and_initialize_model()
 
 bool NeuralNetTracker::open_camera()
 {
+    QString camera_name = settings_.camera_name;
+    if (camera_name.isEmpty())
+    {
+        // Fresh settings have no camera selected. Fall back to the first
+        // camera, like the other trackers do, instead of failing outright.
+        const auto names = video::camera_names();
+        if (names.empty())
+            return false;
+        camera_name = names[0];
+        qDebug() << "neuralnet tracker: no camera configured, using" << camera_name;
+    }
+
     int rint = std::clamp(*settings_.resolution, 0, (int)std::size(resolution_choices) - 1);
     resolution_tuple res = resolution_choices[rint];
     int fps = enum_to_fps(settings_.force_fps);
 
     QMutexLocker l(&camera_mtx_);
 
-    camera_ = video::make_camera(settings_.camera_name);
+    camera_ = video::make_camera(camera_name);
 
     if (!camera_)
         return false;
@@ -651,8 +683,12 @@ void NeuralNetTracker::run()
 
     while (!isInterruptionRequested())
     {
-        is_visible_ = check_is_visible();
+        // The preview is only drawn when somebody can see it: either the main
+        // window is hidden/minimized, or its preview area is collapsed. The
+        // tracker keeps running in both cases; only the drawing is skipped.
+        is_visible_ = check_is_visible() && video_widget_ && video_widget_->isVisible();
         auto t = clk.now();
+        float crop_diagonal_scale = 1.f;
         {
             QMutexLocker l(&camera_mtx_);
 
@@ -661,9 +697,20 @@ void NeuralNetTracker::run()
             if (!res)
             {
                 l.unlock();
+                // A camera that stops delivering frames (unplugged, driver
+                // crash, ...) must not leave us reporting the last pose
+                // forever. Invalidate the track after a short grace period so
+                // that a single dropped frame does not interrupt tracking.
+                if (++consecutive_frame_failures_ >= MAX_CONSECUTIVE_FRAME_FAILURES)
+                {
+                    QMutexLocker lck(&mtx_);
+                    tracking_valid_ = false;
+                }
                 portable::sleep(100);
                 continue;
             }
+            consecutive_frame_failures_ = 0;
+
             if (img.channels != 1 && img.channels != 3)
             {
                 qDebug() << "Can't handle" << img.channels << "color channels";
@@ -675,11 +722,13 @@ void NeuralNetTracker::run()
                 resolution_ = { img.width, img.height };
             }
 
-            copy_frame(img, frame_copy_);
+            crop_diagonal_scale = copy_frame(img, frame_copy_);
         }
 
         pyramid_.init(frame_copy_);
-        intrinsics_ = make_intrinsics(aspect(pyramid_.image()), settings_);
+        // The field of view setting refers to the whole frame, the intrinsics
+        // must however describe the 4:3 crop the tracker works on.
+        intrinsics_ = make_intrinsics(aspect(pyramid_.image()), settings_.fov, crop_diagonal_scale);
 
         if (is_visible_)
         {
@@ -702,19 +751,16 @@ void NeuralNetTracker::run()
 }
 
 
-void NeuralNetTracker::copy_frame(const video::frame& frame, cv::Mat& dest) const
+float NeuralNetTracker::copy_frame(const video::frame& frame, cv::Mat& dest) const
 {
     auto img = cv::Mat(frame.height, frame.width, CV_8UC(frame.channels), (void*)frame.data, frame.stride);
-    // Crop if aspect ratio is not 4:3
-    if (img.rows * 4 != img.cols * 3)
-    {
-        img = img(make_crop_rect_for_aspect(img.size(), 4, 3));
-    }
+    const cv::Rect roi = cropped_rect(img.size());
 
-    constexpr int multiplier = 1 << (ImagePyramid::max_levels-1);
-    img = img(make_crop_rect_multiple_of(img.size(), multiplier));
+    img(roi).copyTo(dest);
 
-    img.copyTo(dest);
+    // Fraction of the frame's diagonal that is kept. Needed to correct the
+    // field of view for the crop when computing the camera intrinsics.
+    return float(std::hypot(roi.width, roi.height) / std::hypot(img.cols, img.rows));
 }
 
 
@@ -824,6 +870,7 @@ NeuralNetDialog::NeuralNetDialog() : trans_calib_(1, 2)
 
     tie_setting(settings_.camera_name, ui_.cameraName);
     tie_setting(settings_.fov, ui_.cameraFOV);
+    tie_setting(settings_.head_size_mm, ui_.headSize);
     tie_setting(settings_.offset_fwd, ui_.tx_spin);
     tie_setting(settings_.offset_up, ui_.ty_spin);
     tie_setting(settings_.offset_right, ui_.tz_spin);

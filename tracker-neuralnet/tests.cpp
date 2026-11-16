@@ -3,8 +3,10 @@
 #include "compat/macros.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <numeric>
+#include <numbers>
 
 namespace neuralnet_tracker_tests
 {
@@ -52,6 +54,75 @@ void test_normalize_brightness()
 
 using neuralnet_tracker_ns::ImagePyramid;
 using neuralnet_tracker_ns::get_matching_level;
+using neuralnet_tracker_ns::cropped_rect;
+using neuralnet_tracker_ns::make_intrinsics;
+
+void test_cropped_rect()
+{
+    auto expect = [](const cv::Size& size, const cv::Rect& want)
+    {
+        const cv::Rect got = cropped_rect(size);
+        assert_(got == want);
+    };
+
+    // 4:3 frames are used as-is.
+    expect({ 640, 480 }, cv::Rect(0, 0, 640, 480));
+    expect({ 1024, 768 }, cv::Rect(0, 0, 1024, 768));
+
+    // 16:9 frames are cropped to 4:3 in the center.
+    expect({ 1920, 1080 }, cv::Rect(240, 0, 1440, 1080));
+    expect({ 1280, 720 }, cv::Rect(160, 0, 960, 720));
+
+    // 1:1 frames are cropped vertically.
+    expect({ 1000, 1000 }, cv::Rect(0, 128, 1000, 744));
+
+    // Aspect ratio and multiple-of-eight alignment combine.
+    expect({ 1366, 768 }, cv::Rect(171, 0, 1024, 768));
+}
+
+void test_make_intrinsics()
+{
+    const double fov = 56.;
+    const double fov_rad = fov * std::numbers::pi / 180.;
+    // Focal length in pixels predicted by the pinhole model for a sensor whose
+    // diagonal field of view is `fov`.
+    auto expected_focal_length_px = [&](const cv::Size& sensor)
+    { return std::hypot(sensor.width, sensor.height) / (2. * std::tan(fov_rad / 2.)); };
+
+    // 4:3 frame: no crop, so the intrinsics describe the whole frame.
+    {
+        const cv::Size size{ 960, 720 };
+        const auto intr = make_intrinsics(float(size.width) / size.height, fov);
+        const double expected = expected_focal_length_px(size);
+        assert_(std::abs(intr.focal_length_w * size.width * 0.5 - expected) < 1.);
+        assert_(std::abs(intr.focal_length_h * size.height * 0.5 - expected) < 1.);
+        assert_(std::abs(intr.fov_w - 2. * std::atan(std::tan(fov_rad / 2.) / std::sqrt(1. + 1. / (16. / 9.)))) < 1e-5);
+    }
+
+    // Cropping a 16:9 frame to 4:3 must not change the focal length in pixels.
+    {
+        const cv::Size frame{ 1280, 720 };
+        const cv::Rect roi = cropped_rect(frame);
+        const float diagonal_scale = float(std::hypot(roi.width, roi.height) / std::hypot(frame.width, frame.height));
+        const auto intr = make_intrinsics(float(roi.width) / roi.height, fov, diagonal_scale);
+        const double expected = expected_focal_length_px(frame);
+        assert_(std::abs(intr.focal_length_w * roi.width * 0.5 - expected) < 1.);
+        assert_(std::abs(intr.focal_length_h * roi.height * 0.5 - expected) < 1.);
+        // The field of view of the crop is smaller than that of the whole frame.
+        assert_(intr.fov_w < fov_rad);
+        assert_(intr.fov_h < fov_rad);
+    }
+
+    // The crop correction must increase the focal length (and thus the reported
+    // distance) relative to using the uncorrected field of view.
+    {
+        const float aspect = 4.f / 3.f;
+        const auto uncorrected = make_intrinsics(aspect, fov);
+        const auto corrected = make_intrinsics(aspect, fov, 0.75f);
+        assert_(corrected.focal_length_w > uncorrected.focal_length_w);
+        assert_(std::abs(corrected.focal_length_w / uncorrected.focal_length_w - 1.f / 0.75f) < 1e-4);
+    }
+}
 
 static constexpr int BIG_PYRAMID_SIZE = 7680;
 static constexpr int SMALL_PYRAMID_SIZE = 320;
@@ -135,6 +206,8 @@ void run()
 {
     test_find_input_intensity_quantile();
     test_normalize_brightness();
+    test_cropped_rect();
+    test_make_intrinsics();
     test_image_pyramid();
     test_get_matching_level();
 }

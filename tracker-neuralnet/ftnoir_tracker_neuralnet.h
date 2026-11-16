@@ -82,6 +82,9 @@ struct Settings : opts
         offset_up{ b, "offset-up", 0 }, offset_right{ b, "offset-right", 0 };
     value<QString> camera_name{ b, "camera-name", "" };
     value<int> fov{ b, "field-of-view", 56 };
+    // Vertical size of the head in millimeters. Only used to convert the
+    // network's head size estimate into a distance from the camera.
+    value<int> head_size_mm{ b, "head-size-mm", 200 };
     value<fps_choices> force_fps{ b, "force-fps", fps_default };
     value<bool> show_network_input{ b, "show-network-input", false };
     value<double> roi_filter_alpha{ b, "roi-filter-alpha", 1. };
@@ -103,6 +106,22 @@ struct CamIntrinsics
     float fov_w;
     float fov_h;
 };
+
+// Returns the region of a frame of the given size that the tracker actually
+// uses. The pose network was trained on 4:3 crops, so wider (or taller) frames
+// are cropped to 4:3 in the center. In addition the size is rounded down to a
+// multiple of the largest image pyramid step so that every level of the pyramid
+// is an exact division of the previous one.
+cv::Rect cropped_rect(const cv::Size& size);
+
+// Pinhole intrinsics of the region returned by cropped_rect().
+// `aspect_ratio` is width/height of that region.
+// `diagonal_fov_deg` is the field of view configured by the user. It refers to
+// the diagonal of the whole frame, so `crop_diagonal_scale` must be set to the
+// fraction of the frame diagonal which survives the crop. Without that
+// correction the field of view of the crop would be overestimated and the
+// distance to the user underestimated.
+CamIntrinsics make_intrinsics(float aspect_ratio, double diagonal_fov_deg, float crop_diagonal_scale = 1.f);
 
 
 class ImagePyramid
@@ -152,7 +171,9 @@ public:
 private:
     bool detect();
     bool open_camera();
-    void copy_frame(const video::frame& frame, cv::Mat& dest) const;
+    // Also returns the fraction of the frame diagonal that survives the crop
+    // (see cropped_rect() and make_intrinsics()).
+    float copy_frame(const video::frame& frame, cv::Mat& dest) const;
     static void maybe_load_onnxruntime_dynamically();
     bool load_and_initialize_model();
     void draw_gizmos(const std::optional<PoseEstimator::Face>& face, const Affine& pose);
@@ -179,7 +200,6 @@ private:
 
     std::optional<cv::Rect2f> last_localizer_roi_;
     std::optional<cv::Rect2f> last_roi_;
-    static constexpr float HEAD_SIZE_MM = 200.f; // In the vertical. Approximately.
 
     mutable QMutex stats_mtx_;
     double fps_ = 0;
@@ -189,6 +209,11 @@ private:
     static constexpr double RC = .25;
     int num_threads_ = 1;
     bool is_visible_ = true;
+
+    // Number of consecutive frames the camera failed to deliver. Used to tell
+    // a brief hiccup from a camera that is gone (unplugged, driver crash, ...).
+    static constexpr int MAX_CONSECUTIVE_FRAME_FAILURES = 3;
+    int consecutive_frame_failures_ = 0;
 
     QMutex mtx_ = {}; // Protects the pose
     std::optional<QuatPose> last_pose_ = {};

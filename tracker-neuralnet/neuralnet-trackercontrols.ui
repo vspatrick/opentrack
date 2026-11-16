@@ -649,6 +649,32 @@ Don't roll or change position.</string>
           </property>
          </widget>
         </item>
+        <item row="3" column="0">
+         <widget class="QLabel" name="headSizeLabel">
+          <property name="text">
+           <string>Head size</string>
+          </property>
+         </widget>
+        </item>
+        <item row="3" column="1">
+         <widget class="QSpinBox" name="headSize">
+          <property name="toolTip">
+           <string>Vertical size of your head, used to estimate the distance from the camera. Measure from the chin to the top of the head.</string>
+          </property>
+          <property name="suffix">
+           <string> mm</string>
+          </property>
+          <property name="minimum">
+           <number>100</number>
+          </property>
+          <property name="maximum">
+           <number>400</number>
+          </property>
+          <property name="singleStep">
+           <number>5</number>
+          </property>
+         </widget>
+        </item>
        </layout>
       </item>
       <item>
